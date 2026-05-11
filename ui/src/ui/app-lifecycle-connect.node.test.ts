@@ -40,6 +40,9 @@ vi.mock("./app-scroll.ts", () => ({
 }));
 
 import { handleConnected } from "./app-lifecycle.ts";
+import { startNodesPolling } from "./app-polling.ts";
+
+const startNodesPollingMock = vi.mocked(startNodesPolling);
 
 function createHost() {
   return {
@@ -71,6 +74,7 @@ describe("handleConnected", () => {
     applySettingsFromUrlMock.mockReset();
     connectGatewayMock.mockReset();
     loadBootstrapMock.mockReset();
+    startNodesPollingMock.mockReset();
     vi.stubGlobal("window", {
       addEventListener: vi.fn(),
     });
@@ -125,5 +129,18 @@ describe("handleConnected", () => {
     expect(applySettingsFromUrlMock.mock.invocationCallOrder[0]).toBeLessThan(
       loadBootstrapMock.mock.invocationCallOrder[0],
     );
+  });
+
+  it("starts Nodes polling only when the Nodes tab is active on connect", () => {
+    loadBootstrapMock.mockResolvedValue(undefined);
+    const chatHost = createHost();
+
+    handleConnected(chatHost as never);
+    expect(startNodesPollingMock).not.toHaveBeenCalled();
+
+    const nodesHost = createHost();
+    nodesHost.tab = "nodes";
+    handleConnected(nodesHost as never);
+    expect(startNodesPollingMock).toHaveBeenCalledWith(nodesHost);
   });
 });

@@ -1,5 +1,5 @@
 // @vitest-environment node
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 const loadSessionsMock = vi.fn();
 const loadChatHistoryMock = vi.fn();
@@ -7,6 +7,7 @@ const applySessionsChangedEventMock = vi.fn();
 
 vi.mock("./app-chat.ts", () => ({
   CHAT_SESSIONS_ACTIVE_MINUTES: 10,
+  CHAT_SESSIONS_REFRESH_LIMIT: 25,
   flushChatQueueForEvent: vi.fn(),
   refreshChatAvatar: vi.fn(),
 }));
@@ -78,7 +79,7 @@ function createHost() {
     },
     password: "",
     clientInstanceId: "instance-test",
-    client: null,
+    client: {},
     connected: true,
     hello: null,
     lastError: null,
@@ -113,6 +114,10 @@ function createHost() {
 }
 
 describe("handleGatewayEvent sessions.changed", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("applies reliable session change snapshots without refetching the list", () => {
     loadSessionsMock.mockReset();
     applySessionsChangedEventMock.mockReset().mockReturnValue({ applied: true, change: "updated" });
@@ -135,7 +140,8 @@ describe("handleGatewayEvent sessions.changed", () => {
     expect(loadSessionsMock).not.toHaveBeenCalled();
   });
 
-  it("reloads sessions when a change event cannot be applied locally", () => {
+  it("debounces session reloads when a change event cannot be applied locally", () => {
+    vi.useFakeTimers();
     loadSessionsMock.mockReset();
     applySessionsChangedEventMock.mockReset().mockReturnValue({ applied: false });
     const host = createHost();
@@ -147,7 +153,75 @@ describe("handleGatewayEvent sessions.changed", () => {
       seq: 1,
     });
 
+    expect(loadSessionsMock).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(4_999);
+    expect(loadSessionsMock).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1);
     expect(loadSessionsMock).toHaveBeenCalledWith(host);
+  });
+
+  it("coalesces unapplied session change reloads into one reconciliation", () => {
+    vi.useFakeTimers();
+    loadSessionsMock.mockReset();
+    applySessionsChangedEventMock.mockReset().mockReturnValue({ applied: false });
+    const host = createHost();
+
+    handleGatewayEvent(host, {
+      type: "event",
+      event: "sessions.changed",
+      payload: { sessionKey: "agent:main:a", reason: "cleanup" },
+      seq: 1,
+    });
+    vi.advanceTimersByTime(2_500);
+    handleGatewayEvent(host, {
+      type: "event",
+      event: "sessions.changed",
+      payload: { sessionKey: "agent:main:b", reason: "cleanup" },
+      seq: 2,
+    });
+
+    vi.advanceTimersByTime(4_999);
+    expect(loadSessionsMock).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1);
+    expect(loadSessionsMock).toHaveBeenCalledTimes(1);
+    expect(loadSessionsMock).toHaveBeenCalledWith(host);
+  });
+
+  it("skips a delayed session reload after the user returns to chat", () => {
+    vi.useFakeTimers();
+    loadSessionsMock.mockReset();
+    applySessionsChangedEventMock.mockReset().mockReturnValue({ applied: false });
+    const host = createHost();
+
+    handleGatewayEvent(host, {
+      type: "event",
+      event: "sessions.changed",
+      payload: { sessionKey: "agent:main:main", reason: "cleanup" },
+      seq: 1,
+    });
+    host.tab = "chat";
+    vi.advanceTimersByTime(5_000);
+
+    expect(loadSessionsMock).not.toHaveBeenCalled();
+  });
+
+  it("skips a delayed session reload after disconnect", () => {
+    vi.useFakeTimers();
+    loadSessionsMock.mockReset();
+    applySessionsChangedEventMock.mockReset().mockReturnValue({ applied: false });
+    const host = createHost();
+
+    handleGatewayEvent(host, {
+      type: "event",
+      event: "sessions.changed",
+      payload: { sessionKey: "agent:main:main", reason: "cleanup" },
+      seq: 1,
+    });
+    host.connected = false;
+    host.client = null;
+    vi.advanceTimersByTime(5_000);
+
+    expect(loadSessionsMock).not.toHaveBeenCalled();
   });
 
   it("does not reload sessions for applied message-phase session patches to existing rows", () => {

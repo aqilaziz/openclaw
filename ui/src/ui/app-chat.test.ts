@@ -469,8 +469,10 @@ describe("refreshChat", () => {
       expect(request).toHaveBeenCalledWith(
         "sessions.list",
         expect.objectContaining({
+          activeMinutes: 120,
           includeGlobal: true,
           includeUnknown: true,
+          limit: 100,
         }),
       );
       expect(request).toHaveBeenCalledWith("models.list", { view: "configured" });
