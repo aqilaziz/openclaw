@@ -5,6 +5,12 @@ import {
 } from "./embedded-agent-subscribe.handlers.tools.js";
 import type { EmbeddedAgentSubscribeContext } from "./embedded-agent-subscribe.handlers.types.js";
 
+const saveMediaBufferMock = vi.hoisted(() => vi.fn());
+
+vi.mock("../media/store.js", () => ({
+  saveMediaBuffer: saveMediaBufferMock,
+}));
+
 // Minimal mock context factory. Only the fields needed for the media emission path.
 function createMockContext(overrides?: {
   shouldEmitToolOutput?: boolean;
@@ -678,6 +684,43 @@ describe("handleToolExecutionEnd media emission", () => {
 
     expect(ctx.state.pendingToolMediaUrls).toEqual(["/tmp/reply.opus"]);
     expect(ctx.state.pendingToolAudioAsVoice).toBe(true);
+    expect(ctx.state.pendingToolTrustedLocalMedia).toBe(true);
+  });
+
+  it("persists read tool image content and queues it as inbound media", async () => {
+    saveMediaBufferMock.mockResolvedValueOnce({
+      id: "read-image.png",
+      path: "/state/media/inbound/read-image.png",
+      size: 8,
+      contentType: "image/png",
+    });
+    const onToolResult = vi.fn();
+    const ctx = createMockContext({
+      shouldEmitToolOutput: false,
+      onToolResult,
+      builtinToolNames: new Set(["read"]),
+    });
+
+    await handleToolExecutionEnd(ctx, {
+      type: "tool_execution_end",
+      toolName: "read",
+      toolCallId: "tc-1",
+      isError: false,
+      result: {
+        content: [
+          { type: "text", text: "Read image file [image/png]" },
+          { type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" },
+        ],
+      },
+    });
+
+    expect(onToolResult).not.toHaveBeenCalled();
+    expect(saveMediaBufferMock).toHaveBeenCalledWith(
+      Buffer.from("iVBORw0KGgo=", "base64"),
+      "image/png",
+      "inbound",
+    );
+    expect(ctx.state.pendingToolMediaUrls).toEqual(["media://inbound/read-image.png"]);
     expect(ctx.state.pendingToolTrustedLocalMedia).toBe(true);
   });
 });

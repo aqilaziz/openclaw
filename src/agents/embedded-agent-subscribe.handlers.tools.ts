@@ -39,6 +39,7 @@ import type {
 } from "./embedded-agent-subscribe.handlers.types.js";
 import { isPromiseLike } from "./embedded-agent-subscribe.promise.js";
 import {
+  extractReadToolImageContentMediaArtifact,
   extractToolResultMediaArtifact,
   extractToolErrorCode,
   extractMessagingToolSend,
@@ -789,7 +790,17 @@ async function emitToolResultOutput(params: {
   }
 
   const outputText = extractToolResultText(sanitizedResult);
-  const mediaReply = isToolError ? undefined : extractToolResultMediaArtifact(result);
+  const mediaReply = isToolError
+    ? undefined
+    : (extractToolResultMediaArtifact(result) ??
+      (await extractReadToolImageContentMediaArtifact({
+        toolName: rawToolName,
+        result,
+        trustedLocalMediaToolNames: ctx.trustedLocalMediaToolNames,
+      }).catch((err) => {
+        ctx.log.warn(`failed to persist read tool image media: ${String(err)}`);
+        return undefined;
+      })));
   const mediaUrls = mediaReply
     ? filterToolResultMediaUrls(
         rawToolName,

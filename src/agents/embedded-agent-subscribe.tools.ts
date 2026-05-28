@@ -1,7 +1,9 @@
 import { getChannelPlugin, normalizeChannelId } from "../channels/plugins/index.js";
 import { normalizeTargetForProvider } from "../infra/outbound/target-normalization.js";
 import { redactSensitiveFieldValue, redactToolPayloadText } from "../logging/redact.js";
+import { canonicalizeBase64 } from "../media/base64.js";
 import { splitMediaFromOutput } from "../media/parse.js";
+import { saveMediaBuffer } from "../media/store.js";
 import { asOptionalRecord as readRecord } from "../shared/record-coerce.js";
 import {
   normalizeOptionalLowercaseString,
@@ -568,6 +570,80 @@ export function extractToolResultMediaArtifact(
 
 export function extractToolResultMediaPaths(result: unknown): string[] {
   return extractToolResultMediaArtifact(result)?.mediaUrls ?? [];
+}
+
+function collectToolResultImageBlocks(result: unknown): Array<{ data: string; mimeType: string }> {
+  if (!result || typeof result !== "object") {
+    return [];
+  }
+  const content = Array.isArray((result as Record<string, unknown>).content)
+    ? ((result as Record<string, unknown>).content as unknown[])
+    : [];
+  const images: Array<{ data: string; mimeType: string }> = [];
+  for (const item of content) {
+    if (!item || typeof item !== "object") {
+      continue;
+    }
+    const entry = item as Record<string, unknown>;
+    if (entry.type !== "image" || typeof entry.data !== "string") {
+      continue;
+    }
+    const mimeType = normalizeOptionalString(entry.mimeType);
+    if (!mimeType) {
+      continue;
+    }
+    const data = canonicalizeBase64(entry.data);
+    if (!data) {
+      continue;
+    }
+    images.push({ data, mimeType });
+  }
+  return images;
+}
+
+/**
+ * Persists image content blocks from a `read` tool result to inbound media
+ * storage and returns a media artifact with `media://inbound/...` URLs.
+ *
+ * This covers the case where the embedded `read` tool returns base64 image
+ * data directly in content blocks but no MEDIA: path or details.path.
+ * Strategy: save each image to the inbound media store and queue
+ * media://inbound/<id> URLs for outbound delivery.
+ */
+export async function extractReadToolImageContentMediaArtifact(params: {
+  toolName: string | undefined;
+  result: unknown;
+  trustedLocalMediaToolNames?: ReadonlySet<string>;
+}): Promise<ToolResultMediaArtifact | undefined> {
+  const rawToolName = params.toolName?.trim();
+  // Only handle the built-in `read` tool when it is registered as trusted.
+  if (
+    rawToolName !== "read" ||
+    !isToolResultMediaTrusted(rawToolName, params.result, params.trustedLocalMediaToolNames)
+  ) {
+    return undefined;
+  }
+  // Skip when structured media is already present (handled by extractToolResultMediaArtifact).
+  if (extractToolResultMediaArtifact(params.result)) {
+    return undefined;
+  }
+  const images = collectToolResultImageBlocks(params.result);
+  if (images.length === 0) {
+    return undefined;
+  }
+  const mediaUrls: string[] = [];
+  for (const image of images) {
+    const saved = await saveMediaBuffer(
+      Buffer.from(image.data, "base64"),
+      image.mimeType,
+      "inbound",
+    );
+    const id = normalizeOptionalString(saved.id);
+    if (id) {
+      mediaUrls.push(`media://inbound/${encodeURIComponent(id)}`);
+    }
+  }
+  return mediaUrls.length > 0 ? { mediaUrls, trustedLocalMedia: true } : undefined;
 }
 
 export function isToolResultError(result: unknown): boolean {
